@@ -1,4 +1,4 @@
-# CSC6010 Final Project: Predicting the Presence of MGMT From MRI Scans Using Deep Convolutional Neural Networks
+# CS6010 Final Project: Predicting the Presence of MGMT From MRI Scans Using Deep Convolutional Neural Networks
 
 Group Members: Michael Blackwell, Sarath Madapana, Naveem Morla
 
