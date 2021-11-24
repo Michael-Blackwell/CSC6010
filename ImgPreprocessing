@@ -5,7 +5,6 @@ import cv2
 import pandas as pd
 import tensorflow as tf
 import re
-import time
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from multiprocessing.pool import ThreadPool
@@ -116,22 +115,6 @@ def stack_images(path_list: list) -> np.ndarray:
     stacked = np.stack(img_byte_list, axis=0)
 
     return stacked
-
-
-# def find_tensor_size(scan: str, path: Path) -> int:
-#     """Find the file with the most images and return a count of the images
-#     This number will be the third dimension of the input tensor."""
-#     file_count = 0
-#     for folder in path.iterdir():
-#         for sub_folder in folder.iterdir():
-#             if sub_folder.name == scan:
-#                 cnt = 0
-#                 for img in sub_folder.iterdir():
-#                     cnt += 1
-#                 if cnt > file_count:
-#                     file_count = cnt
-#
-#     return file_count
 
 
 def preprocess_images(record: tuple) -> int:
