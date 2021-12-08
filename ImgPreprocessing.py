@@ -8,13 +8,16 @@ import re
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from multiprocessing.pool import ThreadPool
+import logging
+
 
 # TODO implement logging
 # ----- Parameters ----- #
 # width, height, depth
-image_size = (256, 256, 300)
+image_size = (256, 256, 60)
 
-mri_types = ['FLAIR', 'T1w', 'T1wCE', 'T2w']
+mri_types = ['FLAIR']  #, 'T1w', 'T1wCE', 'T2w']
+# TODO right now only prepares FLAIR images in stacks of 60. Need to determine optimal depth for remaining scan types.
 
 project_path = Path.cwd()
 label_path = project_path / 'train_labels.csv'
@@ -37,6 +40,11 @@ def _bytes_feature(value):
     if isinstance(value, type(tf.constant(0))):
         value = value.numpy()  # BytesList won't unpack a string from an EagerTensor.
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
+
+
+def _float_feature(value):
+    """Returns a float_list from a float / double. | Taken from TensorFlow documentation."""
+    return tf.train.Feature(float_list=tf.train.FloatList(value=[value]))
 
 
 def _int64_feature(value):
@@ -108,13 +116,46 @@ def stack_images(path_list: list) -> np.ndarray:
 
     for file in path_list:
         img = load_dicom_image(file)
-        if img.max() == 0 and img.min() == 0:
-            continue
+        # Omit "warm-up" images and blank images
+        # if np.count_nonzero(img) < 4100:
+        #     continue
         img_byte_list.append(img)
 
     stacked = np.stack(img_byte_list, axis=0)
 
     return stacked
+
+
+def pad_3dimage(image_3d: np.array, padding: int) -> np.array:
+    """Return a numpy array of stacked pixel values that are equally padded on each side."""
+    # Determine number of zero layers needed on each side
+    top_padding = int(padding / 2)
+    bottom_padding = padding - top_padding
+
+    # Create top and bottom zero arrays
+    top_zero = np.zeros((top_padding, image_size[0], image_size[1]))
+    bottom_zero = np.zeros((bottom_padding, image_size[0], image_size[1]))
+
+    # Append layers on top and bottom of image
+    padded_image = np.concatenate((top_zero, image_3d), axis=0).astype(dtype='float32')
+    padded_image = np.concatenate((padded_image, bottom_zero), axis=0).astype(dtype='float32')
+
+    return padded_image
+
+
+def select_n_images(sorted_path_list: list, n: int) -> list:
+    """Select the middle n images from a list of filepaths."""
+    # Find the center of the filepath list
+    list_center = int(len(sorted_path_list) / 2)
+
+    # Determine the upper and lower indices to slice the list on
+    top_idx = list_center + min(n - int(n / 2), list_center)
+    bottom_idx = list_center - min(int(n / 2), list_center)
+
+    # Slice and return the list
+    selected_images = sorted_path_list[bottom_idx: top_idx]
+
+    return selected_images
 
 
 def preprocess_images(record: tuple) -> int:
@@ -131,30 +172,35 @@ def preprocess_images(record: tuple) -> int:
     # For one scan type, get a sorted list of all image files in the directory.
     path_list = search(file_data['in_path'] / file_data['MRI_Type'])
 
+    # If the path_list contains too many images (more than specified image depth) select the middle n images.
+    if len(path_list) > image_size[2]:
+        path_list = select_n_images(path_list, image_size[2])
+
     # Load all of the images as binary files and stack them like a tensor.
-    # image3d = np.stack([load_dicom_image(f) for f in path_list], axis=0)
     image3d = stack_images(path_list)
 
-    # we need all inputs to the model to be of the same shape.
-    # if there are not enough images to reach the desired depth, pad with 0's, then normalize.
-    # todo determine the max number of images for a given scan type and set that as the tensor size.
-    #  Perhaps this is not the best way. Maybe feeding images one at a time and using LSTMs? look into it.
-
+    # All inputs to the model need to be of the same shape.
+    # If there are not enough images to reach the desired depth, pad with 0's, then normalize.
     usable_images = image3d.shape[0]
     if image3d.shape[0] < image_size[2]:
-        n_zero = np.zeros((image_size[2] - image3d.shape[0],
-                           image_size[0],
-                           image_size[1]))
-        image3d = np.concatenate((image3d, n_zero), axis=0).astype(dtype='float32')
-    image3d = np.expand_dims(image3d, axis=-1)  # todo why expand like this?
-    image3d = image3d / 4096  # TODO why 4096?
+        padding = image_size[2] - image3d.shape[0]
+        image3d = pad_3dimage(image3d, padding)
+
+    image3d = image3d / 4096  # TODO why 4096? Why not max for each batch? Confirm 4096 is max DICOM pixel value
+    # Convert to tensor
+    image_tensor = tf.convert_to_tensor(image3d)
+    # Reshape tensor (batch, image height, image width, image depth)
+    image_tensor = tf.reshape(image_tensor, (1, image_size[0], image_size[1], image_size[2]))
+    # Serialize tensor
+    image_tensor_ser = tf.io.serialize_tensor(image_tensor)
+    # inverse operation is tf.io.parse_tensor(image_tensor_ser, out_type=tf.float32)
 
     # Extract Patient ID and Scan Type from filepaths
-    patient_id = bytes(patient_id, 'utf-8')
-    scan = bytes(file_data['MRI_Type'], 'utf-8')
+    patient_id = bytes(patient_id, encoding='utf-8')
+    scan = bytes(file_data['MRI_Type'], encoding='utf-8')
 
     # Create feature dictionary for TFRecord file.
-    data = {'image': _bytes_feature(image3d.tobytes()),
+    data = {'image': _bytes_feature(image_tensor_ser),
             'image_width': _int64_feature(image_size[0]),
             'image_height': _int64_feature(image_size[1]),
             'image_depth': _int64_feature(image_size[2]),
@@ -178,7 +224,7 @@ def preprocess_images(record: tuple) -> int:
 
 
 def compile_tfrecord_files(scan_types: list, filepath: Path, val_split: float) -> None:
-    """Preprocess n samples from the dataset into a TFRecord file."""
+    """Preprocess samples from the dataset into a TFRecord file."""
 
     train_df, val_df = get_file_lists(filepath, val_split)
 
@@ -187,14 +233,35 @@ def compile_tfrecord_files(scan_types: list, filepath: Path, val_split: float) -
         val_df['MRI_Type'] = kind
 
         # Concurrently process 10 files at a time.
-        # TODO Add another loop for the training set, only using the smaller validation set right now for testing.
-        preprocessed_imgs = ThreadPool(1).imap_unordered(preprocess_images, val_df.iterrows())
-        image_counts = []
-        for img_cnt in tqdm(preprocessed_imgs, total=len(val_df), desc='Preprocessing Images'):
-            image_counts.append(img_cnt)
+        # Prepare training data
+        # image_counts = []
+        preprocessed_imgs = ThreadPool(10).imap_unordered(preprocess_images, train_df.iterrows())
+        for img_cnt in tqdm(preprocessed_imgs, total=len(train_df), desc=f'Preprocessing Training Data ({kind})'):
+            # image_counts.append(img_cnt)
+            pass
 
-        print(kind, max(image_counts))
+        # Prepare validation data
+        preprocessed_imgs = ThreadPool(10).imap_unordered(preprocess_images, val_df.iterrows())
+        for img_cnt in tqdm(preprocessed_imgs, total=len(val_df), desc=f'Preprocessing Validation Data ({kind})'):
+            # image_counts.append(img_cnt)
+            pass
+
+        # print(kind, max(image_counts))
+        # the maximum number of usable patient images for each scan type.
+        # FLAIR - 316
+        # T1w - 253
+        # T1wCE - 265
+        # T2w - 306
+        pass
+
+
+def find_usable_images(img_list: list):
+    imagedf = pd.DataFrame(index=img_list, columns=['pxl_count', 'max_pxl_value'])
+    for path in img_list:
+        img = load_dicom_image(path)
+        imagedf.loc[path] = [np.count_nonzero(img), np.max(img)]
+    pass
 
 
 if __name__ == "__main__":
-    compile_tfrecord_files(["FLAIR"], train_data_path, val_split=0.2)
+    compile_tfrecord_files(mri_types, train_data_path, val_split=0.2)
