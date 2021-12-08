@@ -1,33 +1,35 @@
 import tensorflow as tf
-import pickle
 import tensorboard
-from Config import *
+from datetime import datetime
 import numpy as np
+from pathlib import Path
 import matplotlib.pyplot as plt
 
 timestamp = datetime.now().strftime('%m-%d-%Y_%H.%M.%S')
 # valpath = '/media/storage/RSNA Brain Tumor Project/val_tr/mri_val.tfrec'
 # trainpath = '/media/storage/RSNA Brain Tumor Project/train_tr/mri_train.tfrec'
-scan_types = ['FLAIR', 'T1w', 'T1wCE', 'T2w']
+scan_types = ['FLAIR']  # , 'T1w', 'T1wCE', 'T2w']
 
 
-def build_model(width=256, height=256, depth=400, name='3dcnn'):
+# Define, train, and evaluate model
+# source: https://keras.io/examples/vision/3D_image_classification/
+def build_model(width=256, height=256, depth=60, name='FLAIR'):
     """Build a 3D convolutional neural network model."""
 
     inputs = tf.keras.Input((width, height, depth, 1))
 
     x = tf.keras.layers.Conv3D(filters=128, kernel_size=3, activation="relu")(inputs)
-    x = tf.keras.layers.MaxPool3D(pool_size=2)(x)
+    x = tf.keras.layers.MaxPool3D(pool_size=3)(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Dropout(0.2)(x)
 
     x = tf.keras.layers.Conv3D(filters=256, kernel_size=3, activation="relu")(x)
-    x = tf.keras.layers.MaxPool3D(pool_size=2)(x)
+    x = tf.keras.layers.MaxPool3D(pool_size=3)(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Dropout(0.2)(x)
 
     x = tf.keras.layers.Conv3D(filters=512, kernel_size=3, activation="relu")(x)
-    x = tf.keras.layers.MaxPool3D(pool_size=2)(x)
+    x = tf.keras.layers.MaxPool3D(pool_size=3)(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Dropout(0.1)(x)
 
@@ -49,31 +51,20 @@ def build_model(width=256, height=256, depth=400, name='3dcnn'):
     return model
 
 
-def train_model():
+def train_model(train_path: Path, val_path: Path):
     for scan_type in scan_types:
-        # load train_dataset dataset
-        tf_data_path = Path.cwd() / 'train_tr/00002'  # / f'datasets/{scan_type}_train_dataset'
-        with open(str(tf_data_path / 'element_spec'), 'rb') as in_:
-            es = pickle.load(in_)
-        train_dataset = tf.data.experimental.load(str(tf_data_path), es, compression='GZIP')
-
-        # # load validation_dataset
-        # tf_data_path = f'./datasets/{scan_type}_validation_dataset'
-        # with open(tf_data_path + '/element_spec', 'rb') as in_:
-        #     es = pickle.load(in_)
-        # validation_dataset = tf.data.experimental.load(str(tf_data_path), es, compression='GZIP')
 
         # Get Model
-        model = build_model(width=image_w, height=image_h, depth=image_d, name=scan_type)
+        model = build_model(width=256, height=256, depth=60, name=scan_type)
 
         # Define and create callback folders
         tb_path = Path.cwd() / f'Callbacks/tensorboard/{timestamp}'
         ckpt_path = Path.cwd() / f'Callbacks/checkpoints/{timestamp}'
-        # early_stop_path = Path.cwd() / f'Callbacks/earlystopping/{timestamp}'
+        early_stop_path = Path.cwd() / f'Callbacks/earlystopping/{timestamp}'
         ckpt_path.mkdir()
         tb_path.mkdir()
-        # early_stop_path.mkdir()
-        tensorboard_cb = tf.keras.callbacks.TensorBoard(log_dir=str(tb_path), write_images=True)
+        early_stop_path.mkdir()
+        tensorboard_cb = tf.keras.callbacks.TensorBoard(log_dir=str(tb_path), write_images=False)
         checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(filepath=str(ckpt_path), save_best_only=True)
         early_stopping_cb = tf.keras.callbacks.EarlyStopping(monitor="val_acc", patience=15)
 
@@ -83,16 +74,16 @@ def train_model():
         url = tb.launch()
 
         epochs = 10
-        # with tf.device('CPU:0'):
-        model.fit(
-            train_dataset,
-            # validation_data=validation_dataset,
-            epochs=epochs,
-            # batch_size=1,
-            # shuffle=True,
-            # verbose=2,
-            callbacks=[checkpoint_cb, early_stopping_cb, tensorboard_cb],
-        )
+        with tf.device('CPU:0'):
+            model.fit(
+                input_generator(train_path, scan_type, 1),
+                validation_data=input_generator(val_path, scan_type, 1),
+                epochs=epochs,
+                batch_size=1,
+                # shuffle=True,
+                # verbose=2,
+                callbacks=[checkpoint_cb, early_stopping_cb, tensorboard_cb],  # early_stopping_cb,
+            )
 
         # save model
         # model.save(f'./models/{scan_type}')
@@ -112,7 +103,7 @@ def train_model():
 
 def load_dataset(path: Path):
     """Loads a TFRecords dataset."""
-    path = '/media/storage/RSNA Brain Tumor Project/train_tr/00000/FLAIR.tfrec'
+    # path = '/media/storage/RSNA Brain Tumor Project/val_tr/00000/FLAIR.tfrec'
     dataset = tf.data.TFRecordDataset(str(path), compression_type='GZIP')
     # Create a dictionary describing the features.
     feat_descriptions = {
@@ -120,12 +111,20 @@ def load_dataset(path: Path):
         'image_width': tf.io.FixedLenFeature([], tf.int64),
         'image_height': tf.io.FixedLenFeature([], tf.int64),
         'image_depth': tf.io.FixedLenFeature([], tf.int64),
-        'label': tf.io.FixedLenFeature([], tf.int64)
+        'label': tf.io.FixedLenFeature([], tf.int64),
+        'scan_type': tf.io.FixedLenFeature([], tf.string),
+        'patient_ID': tf.io.FixedLenFeature([], tf.string),
     }
+
     # parsed_dataset = tf.io.parse_single_example(dataset, feat_descriptions)
     parsed_dataset = dataset.map(lambda x: tf.io.parse_single_example(x, feat_descriptions))
 
-    return parsed_dataset
+    # Right now each tfr file contains images for one patient.
+    for parsed_record in parsed_dataset.take(1):
+        img_tensor = tf.io.parse_tensor(parsed_record['image'], out_type=tf.float32)
+        label = parsed_record['label']
+
+    return img_tensor, label
 
 
 def get_file_list(filepath: Path, scantype: str) -> list:
@@ -155,24 +154,26 @@ def input_generator(filepath: Path, scantype: str, batchsize: int) -> tuple:
             np.random.shuffle(file_path_list)
         else:
             batch = file_path_list[i * batchsize:(i + 1) * batchsize]
-            images, labels = [], []
+            # images, labels = [], []
             # Since this project is a binary classifier we do not need to worry about assigning text labels
-            label_classes = tf.constant(0, 1)
+            # label_classes = tf.constant(0, 1)
 
             for file in batch:  # prepare the batch
-                temp = load_dataset(file)
-                data.append(temp.values.reshape(32, 32, 1))
-                pattern = tf.constant(eval("file[14:21]"))  # This line has changed
-                labels.append()
+                img, label = load_dataset(file)  # file)
+                # images.append(img)
+                # labels.append(label)
+                pass
 
-            data = np.asarray(data).reshape(-1, 32, 32, 1)
-            labels = np.asarray(labels)
+            # data = np.asarray(images).reshape(-1, 32, 32, 1)
+            # labels = np.asarray(labels)
+            label = tf.reshape(label, (-1, 1))
 
-            yield images, labels
+            yield img, label
             i += 1
 
 
 if __name__ == '__main__':
     # model = build_model()
-    train_model()
-
+    train_path = Path('/media/storage/RSNA Brain Tumor Project/train_tr')
+    val_path = Path('/media/storage/RSNA Brain Tumor Project/val_tr')
+    train_model(train_path, val_path)
