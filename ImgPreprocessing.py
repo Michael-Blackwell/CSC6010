@@ -16,7 +16,7 @@ import logging
 # width, height, depth
 image_size = (256, 256, 60)
 
-mri_types = ['FLAIR']  #, 'T1w', 'T1wCE', 'T2w']
+mri_types = ['FLAIR', 'T1w', 'T1wCE', 'T2w']
 # TODO right now only prepares FLAIR images in stacks of 60. Need to determine optimal depth for remaining scan types.
 
 project_path = Path.cwd()
@@ -145,15 +145,19 @@ def pad_3dimage(image_3d: np.array, padding: int) -> np.array:
 
 def select_n_images(sorted_path_list: list, n: int) -> list:
     """Select the middle n images from a list of filepaths."""
+    half = int(n/2)
     # Find the center of the filepath list
     list_center = int(len(sorted_path_list) / 2)
 
+    # Determine increment to slice with, want to span 60% of images bidirectionally
+    increment = max(int((list_center * 0.6) / half), 1)
+
     # Determine the upper and lower indices to slice the list on
-    top_idx = list_center + min(n - int(n / 2), list_center)
-    bottom_idx = list_center - min(int(n / 2), list_center)
+    top_idx = list_center + min((n - half) * increment, list_center-1)
+    bottom_idx = list_center - min(half * increment, list_center)
 
     # Slice and return the list
-    selected_images = sorted_path_list[bottom_idx: top_idx]
+    selected_images = sorted_path_list[bottom_idx: top_idx: increment]
 
     return selected_images
 
@@ -186,11 +190,11 @@ def preprocess_images(record: tuple) -> int:
         padding = image_size[2] - image3d.shape[0]
         image3d = pad_3dimage(image3d, padding)
 
-    image3d = image3d / 4096  # TODO why 4096? Why not max for each batch? Confirm 4096 is max DICOM pixel value
+    image3d = image3d / np.max(image3d)  # TODO why 4096? Why not max for each batch? Confirm 4096 is max DICOM pixel value
     # Convert to tensor
     image_tensor = tf.convert_to_tensor(image3d)
     # Reshape tensor (batch, image height, image width, image depth)
-    image_tensor = tf.reshape(image_tensor, (1, image_size[0], image_size[1], image_size[2]))
+    image_tensor = tf.reshape(image_tensor, (image_size[0], image_size[1], image_size[2]))
     # Serialize tensor
     image_tensor_ser = tf.io.serialize_tensor(image_tensor)
     # inverse operation is tf.io.parse_tensor(image_tensor_ser, out_type=tf.float32)
