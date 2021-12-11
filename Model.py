@@ -6,9 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 timestamp = datetime.now().strftime('%m-%d-%Y_%H.%M.%S')
-# valpath = '/media/storage/RSNA Brain Tumor Project/val_tr/mri_val.tfrec'
-# trainpath = '/media/storage/RSNA Brain Tumor Project/train_tr/mri_train.tfrec'
-scan_types = ['FLAIR']  # , 'T1w', 'T1wCE', 'T2w']
+scan_types = ['T1w']  # ['FLAIR', 'T1w', 'T1wCE', 'T2w']
 
 
 # Define, train, and evaluate model
@@ -18,22 +16,29 @@ def build_model(width=256, height=256, depth=60, name='FLAIR'):
 
     inputs = tf.keras.Input((width, height, depth, 1))
 
-    x = tf.keras.layers.Conv3D(filters=128, kernel_size=3, activation="relu")(inputs)
-    x = tf.keras.layers.MaxPool3D(pool_size=3)(x)
+    x = tf.keras.layers.Conv3D(filters=16, kernel_size=3, activation="relu")(inputs)
+    x = tf.keras.layers.MaxPool3D(pool_size=2)(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
+    # x = tf.keras.layers.Dropout(0.2)(x)
 
-    x = tf.keras.layers.Conv3D(filters=256, kernel_size=3, activation="relu")(x)
-    x = tf.keras.layers.MaxPool3D(pool_size=3)(x)
+    x = tf.keras.layers.Conv3D(filters=64, kernel_size=3, activation="relu")(x)
+    x = tf.keras.layers.MaxPool3D(pool_size=2)(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
+    # x = tf.keras.layers.Dropout(0.2)(x)
 
-    x = tf.keras.layers.Conv3D(filters=512, kernel_size=3, activation="relu")(x)
+    x = tf.keras.layers.Conv3D(filters=128, kernel_size=3, activation="relu")(x)
     x = tf.keras.layers.MaxPool3D(pool_size=3)(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(0.1)(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+
+    # x = tf.keras.layers.Conv3D(filters=512, kernel_size=3, activation="relu")(x)
+    # x = tf.keras.layers.MaxPool3D(pool_size=3)(x)
+    # x = tf.keras.layers.BatchNormalization()(x)
+    # x = tf.keras.layers.Dropout(0.1)(x)
 
     x = tf.keras.layers.Flatten()(x)
+
+    x = tf.keras.layers.Dense(units=50, activation="relu")(x)
 
     outputs = tf.keras.layers.Dense(units=1, activation="sigmoid")(x)
 
@@ -51,39 +56,53 @@ def build_model(width=256, height=256, depth=60, name='FLAIR'):
     return model
 
 
-def train_model(train_path: Path, val_path: Path):
+def train_model(train_path: Path, val_path: Path, batch: int, epochs: int):
     for scan_type in scan_types:
 
-        # Get Model
+        # Build the model
         model = build_model(width=256, height=256, depth=60, name=scan_type)
 
-        # Define and create callback folders
+        # Define callbacks and create folders to save them in
         tb_path = Path.cwd() / f'Callbacks/tensorboard/{timestamp}'
         ckpt_path = Path.cwd() / f'Callbacks/checkpoints/{timestamp}'
         early_stop_path = Path.cwd() / f'Callbacks/earlystopping/{timestamp}'
+
         ckpt_path.mkdir()
         tb_path.mkdir()
         early_stop_path.mkdir()
-        tensorboard_cb = tf.keras.callbacks.TensorBoard(log_dir=str(tb_path), write_images=False)
+
+        tensorboard_cb = tf.keras.callbacks.TensorBoard(log_dir=str(tb_path),
+                                                        # write_images=True,
+                                                        histogram_freq=1,
+                                                        )
         checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(filepath=str(ckpt_path), save_best_only=True)
         early_stopping_cb = tf.keras.callbacks.EarlyStopping(monitor="val_acc", patience=15)
 
-        # Launch Tensorboard
+        # Launch Tensorboard, can be accessed by going to http://localhost:6006 in your browser
         tb = tensorboard.program.TensorBoard()
         tb.configure(argv=[None, '--logdir', str(tb_path)])
         url = tb.launch()
 
-        epochs = 10
-        with tf.device('CPU:0'):
-            model.fit(
-                input_generator(train_path, scan_type, 1),
-                validation_data=input_generator(val_path, scan_type, 1),
-                epochs=epochs,
-                batch_size=1,
-                # shuffle=True,
-                # verbose=2,
-                callbacks=[checkpoint_cb, early_stopping_cb, tensorboard_cb],  # early_stopping_cb,
-            )
+        # Experimenting with these: Create Datasets from Generators
+        training_data = tf.data.Dataset.from_generator(lambda: input_generator(train_path, scan_type),
+                                                       output_types=(tf.float32, tf.int64),
+                                                       output_shapes=((256, 256, 60), (1, 1)))
+
+        validation_data = tf.data.Dataset.from_generator(lambda: input_generator(val_path, scan_type),
+                                                         output_types=(tf.float32, tf.int64),
+                                                         output_shapes=((256, 256, 60), (1, 1)))
+
+        # Change to 'CPU:0' to use CPU instead of GPU
+        # with tf.device('GPU:0'):
+        model.fit(
+            training_data.batch(batch),  # input_generator(train_path, scan_type, 1),#
+            validation_data=validation_data.batch(batch),  # input_generator(val_path, scan_type, 1),   #
+            epochs=epochs,
+            batch_size=batch,
+            # shuffle=True,
+            # verbose=2,
+            callbacks=[checkpoint_cb, early_stopping_cb, tensorboard_cb]
+        )
 
         # save model
         # model.save(f'./models/{scan_type}')
@@ -142,38 +161,32 @@ def get_file_list(filepath: Path, scantype: str) -> list:
     return total_file_list
 
 
-def input_generator(filepath: Path, scantype: str, batchsize: int) -> tuple:
+def input_generator(filepath: Path, scantype: str) -> tuple:
     """Yield a single label and stacked MRI image for the model to train on."""
     # Get a list of all tfrec data files.
     file_path_list = get_file_list(filepath, scantype)
 
-    i = 0
+    counter = 0
     while True:  # On each loop, one 'batch' is generated
-        if i * batchsize >= len(file_path_list):
-            i = 0
+        # When at the end of the list, reset the counter, shuffle file list, and end generator.
+        if counter >= len(file_path_list):
+            counter = 0
             np.random.shuffle(file_path_list)
+
+            img, label = load_dataset(file_path_list[counter])
+            label = tf.reshape(label, (-1, 1))
+            return img, label
+
         else:
-            batch = file_path_list[i * batchsize:(i + 1) * batchsize]
-            # images, labels = [], []
-            # Since this project is a binary classifier we do not need to worry about assigning text labels
-            # label_classes = tf.constant(0, 1)
-
-            for file in batch:  # prepare the batch
-                img, label = load_dataset(file)  # file)
-                # images.append(img)
-                # labels.append(label)
-                pass
-
-            # data = np.asarray(images).reshape(-1, 32, 32, 1)
-            # labels = np.asarray(labels)
+            img, label = load_dataset(file_path_list[counter])
             label = tf.reshape(label, (-1, 1))
 
             yield img, label
-            i += 1
+            counter += 1
 
 
 if __name__ == '__main__':
-    # model = build_model()
+
     train_path = Path('/media/storage/RSNA Brain Tumor Project/train_tr')
     val_path = Path('/media/storage/RSNA Brain Tumor Project/val_tr')
-    train_model(train_path, val_path)
+    train_model(train_path, val_path, batch=2, epochs=1)
