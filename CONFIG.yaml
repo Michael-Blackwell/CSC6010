@@ -1,8 +1,0 @@
-image_d: 60
-image_h: 256
-image_w: 256
-scan_types:
-- FLAIR
-- T1w
-- T1wCE
-- T2w
